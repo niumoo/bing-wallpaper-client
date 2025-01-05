@@ -120,10 +120,27 @@ fn set_wallpaper(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+// 获取 Bing 壁纸链接
+fn get_bing_wallpaper_url() -> Result<String, Box<dyn std::error::Error>> {
+    info!("Fetching Bing wallpaper URL");
+    
+    // 获取壁纸链接
+    let response = ureq::get("https://bing.wdbyte.com/today")
+        .call()?;
+    
+    // 读取响应内容（图片链接）
+    let mut url = String::new();
+    response.into_reader().read_to_string(&mut url)?;
+    
+    info!("Got Bing wallpaper URL: {}", url);
+    Ok(url)
+}
+
+
 // 下载和设置壁纸的函数
 fn download_and_set_wallpaper(force: bool) -> Result<(), Box<dyn std::error::Error>> {
-    // 只有在非强制模式下才检查今日壁纸是否存在
-    if !force && is_today_wallpaper_exists() {
+     // 只有在非强制模式下才检查今日壁纸是否存在
+     if !force && is_today_wallpaper_exists() {
         info!("Today's wallpaper already exists, skipping download");
         return Ok(());
     }
@@ -131,9 +148,11 @@ fn download_and_set_wallpaper(force: bool) -> Result<(), Box<dyn std::error::Err
     let wallpaper_path = get_today_wallpaper_path()?;
     info!("Downloading wallpaper to: {:?}", wallpaper_path);
 
+    // 获取今日壁纸链接
+    let wallpaper_url = get_bing_wallpaper_url()?;
+    
     // 下载图片
-    let response = ureq::get("https://cn.bing.com/th?id=OHR.VietnamFalls_EN-US9133406245_UHD.jpg&pid=hp&w=1920")
-        .call()?;
+    let response = ureq::get(&wallpaper_url).call()?;
     
     let mut bytes: Vec<u8> = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;

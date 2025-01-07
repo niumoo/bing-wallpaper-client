@@ -10,13 +10,13 @@ use std::{
         Arc, Mutex,
     },
 };
-use chrono::Local;
 use log::{info, error, warn};
 use tauri::{
     Manager,
     menu::{Menu, MenuItem},
     tray::{TrayIcon, TrayIconBuilder}
 };
+use serde::Deserialize;
 
 #[cfg(target_os = "windows")]
 use winapi::{
@@ -52,11 +52,26 @@ impl std::fmt::Display for AppError {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct WallpaperInfo {
+    file_name: String,
+    url: String,
+}
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn get_app_data_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME")?;
-    let app_dir = PathBuf::from(home).join(".bing-wallpaper-client");
+    #[cfg(windows)]
+    let app_dir = {
+        let app_data = std::env::var("APPDATA")?;
+        PathBuf::from(app_data).join("bing-wallpaper-client")
+    };
+
+    #[cfg(not(windows))]
+    let app_dir = {
+        let home = std::env::var("HOME")?;
+        PathBuf::from(home).join(".bing-wallpaper-client")
+    };
     
     if !app_dir.exists() {
         fs::create_dir_all(&app_dir)?;
@@ -66,14 +81,13 @@ fn get_app_data_dir() -> Result<PathBuf> {
     Ok(app_dir)
 }
 
-fn get_today_wallpaper_path() -> Result<PathBuf> {
+fn get_wallpaper_path(filename: &str) -> Result<PathBuf> {
     let app_dir = get_app_data_dir()?;
-    let date = Local::now().format("%Y-%m-%d");
-    Ok(app_dir.join(format!("{}.jpg", date)))
+    Ok(app_dir.join(filename))
 }
 
-fn is_today_wallpaper_exists() -> bool {
-    get_today_wallpaper_path().map(|path| path.exists()).unwrap_or(false)
+fn is_wallpaper_exists(filename: &str) -> bool {
+    get_wallpaper_path(filename).map(|path| path.exists()).unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -117,28 +131,32 @@ fn set_wallpaper(path: &str) -> Result<()> {
     }
 }
 
-fn get_bing_wallpaper_url(is_china: bool) -> Result<String> {
+fn get_bing_wallpaper_info(is_china: bool) -> Result<WallpaperInfo> {
     let api_url = if is_china { CHINA_API_URL } else { GLOBAL_API_URL };
     let response = ureq::get(api_url).call()?;
-    let mut url = String::new();
-    response.into_reader().read_to_string(&mut url)?;
-    Ok(url)
+    let mut content = String::new();
+    response.into_reader().read_to_string(&mut content)?;
+    let wallpaper_info: WallpaperInfo = serde_json::from_str(&content)?;
+    Ok(wallpaper_info)
 }
 
 fn download_and_set_wallpaper(force: bool, is_china: bool) -> Result<()> {
-    if !force && is_today_wallpaper_exists() {
-        info!("Today's wallpaper already exists, skipping download");
+    let wallpaper_info = get_bing_wallpaper_info(is_china)?;
+    
+    if !force && is_wallpaper_exists(&wallpaper_info.file_name) {
+        info!("Wallpaper {} already exists, skipping download", wallpaper_info.file_name);
         return Ok(());
     }
 
-    let wallpaper_path = get_today_wallpaper_path()?;
-    let wallpaper_url = get_bing_wallpaper_url(is_china)?;
+    let wallpaper_path = get_wallpaper_path(&wallpaper_info.file_name)?;
     
-    let response = ureq::get(&wallpaper_url).call()?;
+    let response = ureq::get(&wallpaper_info.url).call()?;
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes)?;
 
     File::create(&wallpaper_path)?.write_all(&bytes)?;
+    
+    info!("Downloaded wallpaper: {}", wallpaper_info.file_name);
     
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     set_wallpaper(wallpaper_path.to_str().unwrap())?;
@@ -200,22 +218,18 @@ fn handle_refresh_mode(
 ) -> Result<()> {
     let mut state = state.lock().unwrap();
     
-    // 停止现有计时器
     if let Some((_handle, running)) = state.timer_handle.take() {
         running.store(false, Ordering::Relaxed);
     }
 
-    // 更新模式
     state.refresh_mode = if state.refresh_mode == new_mode {
         RefreshMode::None
     } else {
         new_mode
     };
 
-    // 更新菜单
     update_menu(app, tray, state.refresh_mode)?;
 
-    // 如果切换到新模式，启动定时器
     if state.refresh_mode == new_mode {
         download_and_set_wallpaper(true, is_china)?;
         state.timer_handle = Some(create_timer_thread(is_china));

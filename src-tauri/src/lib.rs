@@ -24,9 +24,28 @@ use winapi::{
     shared::minwindef::TRUE,
 };
 
-const REFRESH_INTERVAL: u64 = 600; // 10 minutes in seconds
+const REFRESH_INTERVAL: u64 = 600; // 10分钟
 const CHINA_API_URL: &str = "https://bing.wdbyte.com/zh-cn/today";
 const GLOBAL_API_URL: &str = "https://bing.wdbyte.com/today";
+
+// 简单的日志实现
+static LOGGER: SimpleLogger = SimpleLogger;
+
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{} - {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum RefreshMode {
@@ -40,11 +59,27 @@ struct AppState {
     timer_handle: Option<(JoinHandle<()>, Arc<AtomicBool>)>,
 }
 
-// Error type
+// 简化的错误类型
 #[derive(Debug)]
 struct AppError(String);
 
-impl std::error::Error for AppError {}
+impl From<std::io::Error> for AppError {
+    fn from(err: std::io::Error) -> Self {
+        AppError(err.to_string())
+    }
+}
+
+impl From<minreq::Error> for AppError {
+    fn from(err: minreq::Error) -> Self {
+        AppError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for AppError {
+    fn from(err: serde_json::Error) -> Self {
+        AppError(err.to_string())
+    }
+}
 
 impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,24 +87,24 @@ impl std::fmt::Display for AppError {
     }
 }
 
+type Result<T> = std::result::Result<T, AppError>;
+
 #[derive(Debug, Deserialize)]
 struct WallpaperInfo {
     file_name: String,
     url: String,
 }
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
 fn get_app_data_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     let app_dir = {
-        let app_data = std::env::var("APPDATA")?;
+        let app_data = std::env::var("APPDATA").map_err(|e| AppError(e.to_string()))?;
         PathBuf::from(app_data).join("bing-wallpaper-client")
     };
 
     #[cfg(not(windows))]
     let app_dir = {
-        let home = std::env::var("HOME")?;
+        let home = std::env::var("HOME").map_err(|e| AppError(e.to_string()))?;
         PathBuf::from(home).join(".bing-wallpaper-client")
     };
     
@@ -82,8 +117,7 @@ fn get_app_data_dir() -> Result<PathBuf> {
 }
 
 fn get_wallpaper_path(filename: &str) -> Result<PathBuf> {
-    let app_dir = get_app_data_dir()?;
-    Ok(app_dir.join(filename))
+    Ok(get_app_data_dir()?.join(filename))
 }
 
 fn is_wallpaper_exists(filename: &str) -> bool {
@@ -105,7 +139,7 @@ fn set_wallpaper(path: &str) -> Result<()> {
         Ok(())
     } else {
         let error_msg = String::from_utf8_lossy(&output.stderr);
-        Err(AppError(format!("Failed to set wallpaper on macOS: {}", error_msg)).into())
+        Err(AppError(format!("Failed to set wallpaper on macOS: {}", error_msg)))
     }
 }
 
@@ -113,7 +147,7 @@ fn set_wallpaper(path: &str) -> Result<()> {
 fn set_wallpaper(path: &str) -> Result<()> {
     use std::ffi::CString;
     
-    let path_cstr = CString::new(path)?;
+    let path_cstr = CString::new(path).map_err(|e| AppError(e.to_string()))?;
     
     unsafe {
         if SystemParametersInfoA(
@@ -126,18 +160,16 @@ fn set_wallpaper(path: &str) -> Result<()> {
             info!("Wallpaper set successfully on Windows");
             Ok(())
         } else {
-            Err(std::io::Error::last_os_error().into())
+            Err(AppError("Failed to set wallpaper on Windows".to_string()))
         }
     }
 }
 
 fn get_bing_wallpaper_info(is_china: bool) -> Result<WallpaperInfo> {
     let api_url = if is_china { CHINA_API_URL } else { GLOBAL_API_URL };
-    let response = ureq::get(api_url).call()?;
-    let mut content = String::new();
-    response.into_reader().read_to_string(&mut content)?;
-    let wallpaper_info: WallpaperInfo = serde_json::from_str(&content)?;
-    Ok(wallpaper_info)
+    let response = minreq::get(api_url).send()?;
+    let content = response.as_str().map_err(|e| AppError(e.to_string()))?;
+    Ok(serde_json::from_str(content)?)
 }
 
 fn download_and_set_wallpaper(force: bool, is_china: bool) -> Result<()> {
@@ -150,9 +182,8 @@ fn download_and_set_wallpaper(force: bool, is_china: bool) -> Result<()> {
 
     let wallpaper_path = get_wallpaper_path(&wallpaper_info.file_name)?;
     
-    let response = ureq::get(&wallpaper_info.url).call()?;
-    let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes)?;
+    let response = minreq::get(&wallpaper_info.url).send()?;
+    let bytes = response.into_bytes();
 
     File::create(&wallpaper_path)?.write_all(&bytes)?;
     
@@ -177,7 +208,7 @@ fn create_timer_thread(is_china: bool) -> (JoinHandle<()>, Arc<AtomicBool>) {
             }
             
             if let Err(e) = download_and_set_wallpaper(false, is_china) {
-                error!("Failed to update wallpaper: {:?}", e);
+                error!("Failed to update wallpaper: {}", e);
             }
         }
     });
@@ -193,19 +224,21 @@ fn update_menu(app: &tauri::AppHandle, tray: &TrayIcon, refresh_mode: RefreshMod
             if refresh_mode == RefreshMode::DailyChina { "每日壁纸刷新(中国) ✓" } else { "每日壁纸刷新(中国)" },
             true,
             None::<&str>,
-        )?,
+        ).map_err(|e| AppError(e.to_string()))?,
         &MenuItem::with_id(
             app,
             "daily_global",
             if refresh_mode == RefreshMode::DailyGlobal { "每日壁纸刷新(国际) ✓" } else { "每日壁纸刷新(国际)" },
             true,
             None::<&str>,
-        )?,
-        &MenuItem::with_id(app, "separator", "--------------", false, None::<&str>)?,
-        &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?,
-    ])?;
+        ).map_err(|e| AppError(e.to_string()))?,
+        &MenuItem::with_id(app, "separator", "--------------", false, None::<&str>)
+            .map_err(|e| AppError(e.to_string()))?,
+        &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
+            .map_err(|e| AppError(e.to_string()))?,
+    ]).map_err(|e| AppError(e.to_string()))?;
     
-    tray.set_menu(Some(new_menu))?;
+    tray.set_menu(Some(new_menu)).map_err(|e| AppError(e.to_string()))?;
     Ok(())
 }
 
@@ -216,7 +249,7 @@ fn handle_refresh_mode(
     new_mode: RefreshMode,
     is_china: bool,
 ) -> Result<()> {
-    let mut state = state.lock().unwrap();
+    let mut state = state.lock().map_err(|_| AppError("Failed to lock state".to_string()))?;
     
     if let Some((_handle, running)) = state.timer_handle.take() {
         running.store(false, Ordering::Relaxed);
@@ -239,9 +272,9 @@ fn handle_refresh_mode(
 }
 
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_secs()
-        .init();
+    // 初始化日志
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
 
     if let Err(e) = tauri::Builder::default()
         .manage(Mutex::new(AppState {
@@ -267,12 +300,12 @@ pub fn run() {
                 match event.id.0.as_str() {
                     "daily_china" => {
                         if let Err(e) = handle_refresh_mode(app, &tray_clone, &state, RefreshMode::DailyChina, true) {
-                            error!("Failed to handle China refresh mode: {:?}", e);
+                            error!("Failed to handle China refresh mode: {}", e);
                         }
                     }
                     "daily_global" => {
                         if let Err(e) = handle_refresh_mode(app, &tray_clone, &state, RefreshMode::DailyGlobal, false) {
-                            error!("Failed to handle Global refresh mode: {:?}", e);
+                            error!("Failed to handle Global refresh mode: {}", e);
                         }
                     }
                     "quit" => app.exit(0),
@@ -284,6 +317,6 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
     {
-        error!("Error running application: {:?}", e);
+        error!("Error running application: {}", e);
     }
 }

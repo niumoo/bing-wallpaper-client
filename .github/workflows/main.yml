@@ -32,7 +32,20 @@ jobs:
         # You can remove libayatana-appindicator3-dev if you don't use the system tray feature.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev
+
+      # 添加 WiX Toolset 支持
+      - name: Install WiX (windows only)
+        if: matrix.platform == 'windows-latest' 
+        run: |
+          curl -LO https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
+          Expand-Archive wix314-binaries.zip -DestinationPath C:\WixTools
+          
+      # 确保 WiX 在系统路径中
+      - name: Add WiX to PATH (windows only)
+        if: matrix.platform == 'windows-latest' 
+        run: echo "C:\WixTools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      
 
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable # Set this to dtolnay/rust-toolchain@nightly

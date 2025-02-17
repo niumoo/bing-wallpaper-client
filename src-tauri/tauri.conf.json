@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "必应壁纸",
+  "productName": "bing-wallpaper-client",
   "version": "0.1.0",
   "identifier": "com.wdbyte.bing.app",
   "build": {

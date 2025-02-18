@@ -257,7 +257,9 @@ fn update_menu(app: &tauri::AppHandle, tray: &TrayIcon, refresh_mode: RefreshMod
             true,
             None::<&str>,
         ).map_err(|e| AppError(e.to_string()))?,
-        &MenuItem::with_id(app, "separator", "--------------", false, None::<&str>)
+        &MenuItem::with_id(app, "separator1", "--------------", false, None::<&str>)
+            .map_err(|e| AppError(e.to_string()))?,
+        &MenuItem::with_id(app, "open_website", "打开必应壁纸网站", true, None::<&str>)
             .map_err(|e| AppError(e.to_string()))?,
         &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
             .map_err(|e| AppError(e.to_string()))?,
@@ -318,7 +320,8 @@ pub fn run() {
                 .menu(&Menu::with_items(app, &[
                     &MenuItem::with_id(app, "daily_china", "每日壁纸刷新(中国)", true, None::<&str>)?,
                     &MenuItem::with_id(app, "daily_global", "每日壁纸刷新(国际)", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "separator", "--------------", false, None::<&str>)?,
+                    &MenuItem::with_id(app, "separator1", "--------------", false, None::<&str>)?,
+                    &MenuItem::with_id(app, "open_website", "打开必应壁纸网站", true, None::<&str>)?,
                     &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?,
                 ])?)
                 .build(app)?;
@@ -337,6 +340,11 @@ pub fn run() {
                     "daily_global" => {
                         if let Err(e) = handle_refresh_mode(app, &tray_clone, &state, RefreshMode::DailyGlobal, false) {
                             error!("Failed to handle Global refresh mode: {}", e);
+                        }
+                    }
+                    "open_website" => {
+                        if let Err(e) = open::that("https://bing.wdbyte.com") {
+                            error!("Failed to open website: {}", e);
                         }
                     }
                     "quit" => app.exit(0),

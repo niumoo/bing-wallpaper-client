@@ -17,6 +17,7 @@ use tauri::{
     tray::{TrayIcon, TrayIconBuilder}
 };
 use serde::Deserialize;
+use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
 use winapi::{
@@ -27,6 +28,7 @@ use winapi::{
 const REFRESH_INTERVAL: u64 = 600; // 10分钟
 const CHINA_API_URL: &str = "https://bing.wdbyte.com/zh-cn/today";
 const GLOBAL_API_URL: &str = "https://bing.wdbyte.com/today";
+const UUID_FILE_NAME: &str = "device_uuid.txt";
 
 // 简单的日志实现
 static LOGGER: SimpleLogger = SimpleLogger;
@@ -93,6 +95,21 @@ type Result<T> = std::result::Result<T, AppError>;
 struct WallpaperInfo {
     file_name: String,
     url: String,
+}
+
+fn get_or_create_uuid() -> Result<String> {
+    let uuid_path = get_app_data_dir()?.join(UUID_FILE_NAME);
+    
+    if uuid_path.exists() {
+        let mut contents = String::new();
+        File::open(uuid_path)?.read_to_string(&mut contents)?;
+        Ok(contents.trim().to_string())
+    } else {
+        let new_uuid = Uuid::new_v4().to_string();
+        File::create(&uuid_path)?.write_all(new_uuid.as_bytes())?;
+        info!("Created new UUID: {}", new_uuid);
+        Ok(new_uuid)
+    }
 }
 
 fn get_app_data_dir() -> Result<PathBuf> {
@@ -167,7 +184,15 @@ fn set_wallpaper(path: &str) -> Result<()> {
 
 fn get_bing_wallpaper_info(is_china: bool) -> Result<WallpaperInfo> {
     let api_url = if is_china { CHINA_API_URL } else { GLOBAL_API_URL };
-    let response = minreq::get(api_url).send()?;
+    
+    // 获取UUID
+    let uuid = get_or_create_uuid()?;
+    
+    let response = minreq::get(api_url)
+        .with_header("client-version", "0.1.0")
+        .with_header("client-device-uuid", &uuid)
+        .send()?;
+    
     let content = response.as_str().map_err(|e| AppError(e.to_string()))?;
     Ok(serde_json::from_str(content)?)
 }
@@ -275,6 +300,12 @@ pub fn run() {
     // 初始化日志
     log::set_logger(&LOGGER).unwrap();
     log::set_max_level(log::LevelFilter::Info);
+
+    // 启动时确保UUID已经生成
+    match get_or_create_uuid() {
+        Ok(uuid) => info!("Using device UUID: {}", uuid),
+        Err(e) => error!("Failed to initialize UUID: {}", e),
+    }
 
     if let Err(e) = tauri::Builder::default()
         .manage(Mutex::new(AppState {

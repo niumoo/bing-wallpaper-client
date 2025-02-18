@@ -315,6 +315,25 @@ pub fn run() {
             timer_handle: None,
         }))
         .setup(|app| {
+            // 在 macOS 托盘中隐藏
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::WindowBuilder;
+                // 创建一个隐藏的主窗口
+                WindowBuilder::new(
+                    app,
+                    "main", /* 这是窗口的唯一标识符 */
+                    tauri::WindowUrl::default(),
+                )
+                .title("Bing Wallpaper")
+                .visible(false)
+                .skip_taskbar(true)
+                .build()?;
+            }
+
             let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&Menu::with_items(app, &[

@@ -1,13 +1,23 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "bing-wallpaper-client",
+  "productName": "Bing Wallpaper",
   "version": "0.1.0",
   "identifier": "com.wdbyte.bing.app",
   "build": {
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [],
+    "windows": [
+      {
+        "fullscreen": false,
+        "height": 0,
+        "width": 0,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "skipTaskbar": true
+      }
+    ],
     "security": {
       "csp": null
     }

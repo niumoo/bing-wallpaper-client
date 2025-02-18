@@ -1,7 +1,7 @@
 [package]
 name = "bing-wallpaper-client"
 version = "0.1.0"
-description = "bing wallpaper client"
+description = "Bing Wallpaper Client"
 authors = ["github/niumoo"]
 edition = "2021"
 

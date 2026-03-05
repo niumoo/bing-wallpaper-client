@@ -18,6 +18,7 @@ use tauri::{
 };
 use serde::Deserialize;
 use uuid::Uuid;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 #[cfg(target_os = "windows")]
 use winapi::{
@@ -241,7 +242,7 @@ fn create_timer_thread(is_china: bool) -> (JoinHandle<()>, Arc<AtomicBool>) {
     (handle, running)
 }
 
-fn update_menu(app: &tauri::AppHandle, tray: &TrayIcon, refresh_mode: RefreshMode) -> Result<()> {
+fn update_menu(app: &tauri::AppHandle, tray: &TrayIcon, refresh_mode: RefreshMode, autostart_enabled: bool) -> Result<()> {
     let new_menu = Menu::with_items(app, &[
         &MenuItem::with_id(
             app,
@@ -259,6 +260,13 @@ fn update_menu(app: &tauri::AppHandle, tray: &TrayIcon, refresh_mode: RefreshMod
         ).map_err(|e| AppError(e.to_string()))?,
         &MenuItem::with_id(app, "separator1", "--------------", false, None::<&str>)
             .map_err(|e| AppError(e.to_string()))?,
+        &MenuItem::with_id(
+            app,
+            "autostart",
+            if autostart_enabled { "开机自启动 ✓" } else { "开机自启动" },
+            true,
+            None::<&str>,
+        ).map_err(|e| AppError(e.to_string()))?,
         &MenuItem::with_id(app, "open_website", "打开必应壁纸网站", true, None::<&str>)
             .map_err(|e| AppError(e.to_string()))?,
         &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)
@@ -288,12 +296,36 @@ fn handle_refresh_mode(
         new_mode
     };
 
-    update_menu(app, tray, state.refresh_mode)?;
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    update_menu(app, tray, state.refresh_mode, autostart_enabled)?;
 
     if state.refresh_mode == new_mode {
         download_and_set_wallpaper(true, is_china)?;
         state.timer_handle = Some(create_timer_thread(is_china));
     }
+
+    Ok(())
+}
+
+fn handle_autostart_toggle(
+    app: &tauri::AppHandle,
+    tray: &TrayIcon,
+    state: &Mutex<AppState>,
+) -> Result<()> {
+    let manager = app.autolaunch();
+    let is_enabled = manager.is_enabled().map_err(|e| AppError(e.to_string()))?;
+
+    if is_enabled {
+        manager.disable().map_err(|e| AppError(e.to_string()))?;
+        info!("Autostart disabled");
+    } else {
+        manager.enable().map_err(|e| AppError(e.to_string()))?;
+        info!("Autostart enabled");
+    }
+
+    let new_status = manager.is_enabled().unwrap_or(false);
+    let state = state.lock().map_err(|_| AppError("Failed to lock state".to_string()))?;
+    update_menu(app, tray, state.refresh_mode, new_status)?;
 
     Ok(())
 }
@@ -310,6 +342,7 @@ pub fn run() {
     }
 
     if let Err(e) = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .manage(Mutex::new(AppState {
             refresh_mode: RefreshMode::None,
             timer_handle: None,
@@ -319,12 +352,16 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            let autostart_label = if autostart_enabled { "开机自启动 ✓" } else { "开机自启动" };
+
             let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&Menu::with_items(app, &[
                     &MenuItem::with_id(app, "daily_china", "每日壁纸刷新(中国)", true, None::<&str>)?,
                     &MenuItem::with_id(app, "daily_global", "每日壁纸刷新(国际)", true, None::<&str>)?,
                     &MenuItem::with_id(app, "separator1", "--------------", false, None::<&str>)?,
+                    &MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?,
                     &MenuItem::with_id(app, "open_website", "打开必应壁纸网站", true, None::<&str>)?,
                     &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?,
                 ])?)
@@ -344,6 +381,11 @@ pub fn run() {
                     "daily_global" => {
                         if let Err(e) = handle_refresh_mode(app, &tray_clone, &state, RefreshMode::DailyGlobal, false) {
                             error!("Failed to handle Global refresh mode: {}", e);
+                        }
+                    }
+                    "autostart" => {
+                        if let Err(e) = handle_autostart_toggle(app, &tray_clone, &state) {
+                            error!("Failed to toggle autostart: {}", e);
                         }
                     }
                     "open_website" => {

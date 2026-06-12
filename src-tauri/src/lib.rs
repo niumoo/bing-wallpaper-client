@@ -16,7 +16,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIcon, TrayIconBuilder}
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
@@ -30,6 +30,7 @@ const REFRESH_INTERVAL: u64 = 600; // 10分钟
 const CHINA_API_URL: &str = "https://bing.wdbyte.com/zh-cn/today";
 const GLOBAL_API_URL: &str = "https://bing.wdbyte.com/today";
 const UUID_FILE_NAME: &str = "device_uuid.txt";
+const CONFIG_FILE_NAME: &str = "config.json";
 
 // 简单的日志实现
 static LOGGER: SimpleLogger = SimpleLogger;
@@ -55,6 +56,57 @@ enum RefreshMode {
     DailyChina,
     DailyGlobal,
     None,
+}
+
+impl RefreshMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RefreshMode::DailyChina => "china",
+            RefreshMode::DailyGlobal => "global",
+            RefreshMode::None => "none",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "china" => RefreshMode::DailyChina,
+            "global" => RefreshMode::DailyGlobal,
+            _ => RefreshMode::None,
+        }
+    }
+
+    fn is_china(&self) -> bool {
+        matches!(self, RefreshMode::DailyChina)
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct AppConfig {
+    refresh_mode: String,
+}
+
+fn save_config(mode: RefreshMode) -> Result<()> {
+    let config = AppConfig {
+        refresh_mode: mode.as_str().to_string(),
+    };
+    let config_path = get_app_data_dir()?.join(CONFIG_FILE_NAME);
+    let json = serde_json::to_string_pretty(&config)?;
+    File::create(&config_path)?.write_all(json.as_bytes())?;
+    info!("Saved config: refresh_mode = {}", mode.as_str());
+    Ok(())
+}
+
+fn load_config() -> Result<RefreshMode> {
+    let config_path = get_app_data_dir()?.join(CONFIG_FILE_NAME);
+    if !config_path.exists() {
+        return Ok(RefreshMode::None);
+    }
+    let mut contents = String::new();
+    File::open(config_path)?.read_to_string(&mut contents)?;
+    let config: AppConfig = serde_json::from_str(&contents)?;
+    let mode = RefreshMode::from_str(&config.refresh_mode);
+    info!("Loaded config: refresh_mode = {}", mode.as_str());
+    Ok(mode)
 }
 
 struct AppState {
@@ -89,6 +141,8 @@ impl std::fmt::Display for AppError {
         write!(f, "{}", self.0)
     }
 }
+
+impl std::error::Error for AppError {}
 
 type Result<T> = std::result::Result<T, AppError>;
 
@@ -296,6 +350,11 @@ fn handle_refresh_mode(
         new_mode
     };
 
+    // 持久化保存刷新模式
+    if let Err(e) = save_config(state.refresh_mode) {
+        error!("Failed to save config: {}", e);
+    }
+
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     update_menu(app, tray, state.refresh_mode, autostart_enabled)?;
 
@@ -341,13 +400,17 @@ pub fn run() {
         Err(e) => error!("Failed to initialize UUID: {}", e),
     }
 
+    // 启动时加载保存的刷新模式
+    let saved_refresh_mode = load_config().unwrap_or(RefreshMode::None);
+    let saved_is_china = saved_refresh_mode.is_china();
+
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .manage(Mutex::new(AppState {
-            refresh_mode: RefreshMode::None,
+            refresh_mode: saved_refresh_mode,
             timer_handle: None,
         }))
-        .setup(|app| {
+        .setup(move |app| {
             // 在 macOS 托盘中隐藏
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -355,17 +418,31 @@ pub fn run() {
             let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
             let autostart_label = if autostart_enabled { "开机自启动 ✓" } else { "开机自启动" };
 
+            let china_label = if saved_refresh_mode == RefreshMode::DailyChina { "每日壁纸刷新(中国) ✓" } else { "每日壁纸刷新(中国)" };
+            let global_label = if saved_refresh_mode == RefreshMode::DailyGlobal { "每日壁纸刷新(国际) ✓" } else { "每日壁纸刷新(国际)" };
+
             let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&Menu::with_items(app, &[
-                    &MenuItem::with_id(app, "daily_china", "每日壁纸刷新(中国)", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "daily_global", "每日壁纸刷新(国际)", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "daily_china", china_label, true, None::<&str>)?,
+                    &MenuItem::with_id(app, "daily_global", global_label, true, None::<&str>)?,
                     &MenuItem::with_id(app, "separator1", "--------------", false, None::<&str>)?,
                     &MenuItem::with_id(app, "autostart", autostart_label, true, None::<&str>)?,
                     &MenuItem::with_id(app, "open_website", "打开必应壁纸网站", true, None::<&str>)?,
                     &MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?,
                 ])?)
                 .build(app)?;
+
+            // 恢复之前保存的刷新模式：立即下载并启动定时器
+            if saved_refresh_mode != RefreshMode::None {
+                if let Err(e) = download_and_set_wallpaper(true, saved_is_china) {
+                    error!("Failed to restore wallpaper on startup: {}", e);
+                }
+                let state = app.state::<Mutex<AppState>>();
+                let mut state = state.lock().map_err(|_| AppError("Failed to lock state".to_string()))?;
+                state.timer_handle = Some(create_timer_thread(saved_is_china));
+                info!("Restored refresh mode: {}", saved_refresh_mode.as_str());
+            }
 
             let tray_clone = tray.clone();
 
